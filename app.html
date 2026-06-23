@@ -1,0 +1,1499 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#000000">
+  <title>AI 摄影导师 — 实时取景助手</title>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    html, body {
+      width: 100%; height: 100%;
+      overflow: hidden;
+      background: #000;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', sans-serif;
+      -webkit-user-select: none; user-select: none;
+      overscroll-behavior: none;
+      touch-action: none;
+    }
+    body {
+      position: fixed; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+    }
+
+    /* === App Container === */
+    .app {
+      position: relative;
+      width: 100%; height: 100%;
+      max-width: 480px;
+      max-height: 100vh;
+      background: #000;
+      overflow: hidden;
+    }
+    @media (min-aspect-ratio: 1/1) {
+      .app { max-width: 480px; height: 100vh; }
+    }
+
+    /* === Video Stage === */
+    .stage {
+      position: absolute; inset: 0;
+      background: #000;
+    }
+    #video {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+      z-index: 1;
+    }
+    #overlay {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      pointer-events: none;
+      z-index: 2;
+    }
+    .stage.mirrored #video { transform: scaleX(-1); }
+    .stage.mirrored #overlay { transform: scaleX(-1); }
+
+    /* === Top Bar === */
+    .top-bar {
+      position: absolute; top: 0; left: 0; right: 0;
+      padding: 14px 16px;
+      padding-top: max(14px, env(safe-area-inset-top));
+      display: flex; align-items: center; justify-content: space-between;
+      background: linear-gradient(180deg, rgba(0,0,0,0.55), transparent);
+      z-index: 10;
+    }
+    .icon-btn {
+      width: 40px; height: 40px;
+      border-radius: 50%;
+      background: rgba(0,0,0,0.35);
+      backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+      border: none; color: #fff;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 20px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .icon-btn:active { transform: scale(0.92); }
+    .icon-btn.active { background: rgba(0, 212, 170, 0.85); }
+    .top-score {
+      display: flex; align-items: center; gap: 8px;
+      background: rgba(0,0,0,0.4);
+      backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+      padding: 6px 12px;
+      border-radius: 100px;
+      font-size: 13px;
+      font-weight: 500;
+    }
+    .top-score .ring {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      background: conic-gradient(#00d4aa var(--p, 0%), rgba(255,255,255,0.2) 0);
+      display: flex; align-items: center; justify-content: center;
+      position: relative;
+    }
+    .top-score .ring::after {
+      content: attr(data-n);
+      position: absolute; inset: 3px;
+      background: #000;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 700;
+      color: #00d4aa;
+    }
+    .top-score .label { font-size: 11px; opacity: 0.7; }
+    .top-score .verdict { font-weight: 600; }
+
+    /* === HUD Message === */
+    .hud-msg {
+      position: absolute;
+      top: 80px; left: 50%; transform: translateX(-50%);
+      max-width: 80%;
+      padding: 10px 16px;
+      background: rgba(0,0,0,0.6);
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 14px;
+      font-size: 14px;
+      text-align: center;
+      z-index: 10;
+      opacity: 0;
+      transition: opacity 0.3s, transform 0.3s;
+      pointer-events: none;
+    }
+    .hud-msg.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+    .hud-msg.good { border-color: rgba(0, 212, 170, 0.5); }
+    .hud-msg.warn { border-color: rgba(255, 200, 87, 0.5); }
+    .hud-msg.bad  { border-color: rgba(255, 107, 107, 0.5); }
+    .hud-msg .icon { margin-right: 6px; }
+
+    /* === Sub Scores === */
+    .sub-scores {
+      position: absolute;
+      top: 140px; right: 12px;
+      display: flex; flex-direction: column; gap: 5px;
+      z-index: 10;
+    }
+    .sub-pill {
+      display: flex; align-items: center; gap: 5px;
+      padding: 4px 9px;
+      background: rgba(0,0,0,0.45);
+      backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+      border-radius: 100px;
+      font-size: 11px;
+      border-left: 2px solid #888;
+    }
+    .sub-pill.s-ok { border-left-color: #00d4aa; }
+    .sub-pill.s-warn { border-left-color: #ffc857; }
+    .sub-pill.s-bad { border-left-color: #ff6b6b; }
+    .sub-pill .lbl { opacity: 0.7; }
+    .sub-pill .val { font-weight: 600; min-width: 22px; text-align: right; }
+    .sub-pill .emo { font-size: 12px; line-height: 1; }
+
+    /* === Bottom Bar === */
+    .bottom-bar {
+      position: absolute; bottom: 0; left: 0; right: 0;
+      padding: 24px 24px;
+      padding-bottom: max(24px, env(safe-area-inset-bottom));
+      display: flex; align-items: center; justify-content: space-between;
+      background: linear-gradient(0deg, rgba(0,0,0,0.6), transparent);
+      z-index: 10;
+    }
+    .gallery-btn {
+      width: 48px; height: 48px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.12);
+      border: 1.5px solid rgba(255,255,255,0.2);
+      overflow: hidden;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px;
+      color: #fff;
+    }
+    .gallery-btn img { width: 100%; height: 100%; object-fit: cover; }
+    .gallery-btn.empty { background: rgba(255,255,255,0.08); }
+    .shutter {
+      width: 76px; height: 76px;
+      border-radius: 50%;
+      background: #fff;
+      border: 4px solid rgba(255,255,255,0.3);
+      cursor: pointer;
+      position: relative;
+      transition: transform 0.15s;
+    }
+    .shutter::after {
+      content: '';
+      position: absolute; inset: 4px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid #000;
+    }
+    .shutter:active { transform: scale(0.92); }
+    .shutter.disabled { opacity: 0.4; pointer-events: none; }
+    .flip-btn {
+      width: 48px; height: 48px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.12);
+      border: 1.5px solid rgba(255,255,255,0.2);
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 20px;
+      color: #fff;
+    }
+    .flip-btn:active { transform: scale(0.92); }
+
+    /* === Mode Selector === */
+    .modes {
+      position: absolute;
+      bottom: 130px; left: 0; right: 0;
+      display: flex; justify-content: center; gap: 18px;
+      z-index: 10;
+    }
+    .mode {
+      padding: 6px 14px;
+      font-size: 13px;
+      color: rgba(255,255,255,0.6);
+      cursor: pointer;
+      border-radius: 100px;
+      transition: all 0.2s;
+      font-weight: 500;
+    }
+    .mode.active {
+      color: #fff;
+      background: rgba(255,255,255,0.15);
+      font-weight: 600;
+    }
+
+    /* === Start Screen (Permission) === */
+    .start-screen {
+      position: absolute; inset: 0;
+      background: linear-gradient(135deg, #0a0a0f 0%, #1a1a2a 100%);
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      z-index: 100;
+      padding: 32px;
+      text-align: center;
+    }
+    .start-screen.hide { display: none; }
+    .start-screen .logo {
+      width: 80px; height: 80px;
+      border-radius: 20px;
+      background: linear-gradient(135deg, #00d4aa, #7c5cfc);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 36px;
+      margin-bottom: 20px;
+      box-shadow: 0 8px 40px rgba(0, 212, 170, 0.3);
+    }
+    .start-screen h1 {
+      font-size: 26px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .start-screen p {
+      color: rgba(255,255,255,0.6);
+      font-size: 14px;
+      line-height: 1.6;
+      max-width: 320px;
+      margin-bottom: 32px;
+    }
+    .start-screen .start-btn {
+      padding: 14px 40px;
+      border-radius: 100px;
+      background: linear-gradient(135deg, #00d4aa, #00b894);
+      color: #000;
+      font-size: 16px;
+      font-weight: 700;
+      border: none;
+      cursor: pointer;
+      box-shadow: 0 6px 24px rgba(0, 212, 170, 0.4);
+    }
+    .start-screen .start-btn:active { transform: scale(0.96); }
+    .start-screen .start-btn:disabled { opacity: 0.5; }
+    .start-screen .features {
+      margin-top: 36px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      width: 100%;
+      max-width: 360px;
+    }
+    .start-screen .feat {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 12px;
+      padding: 12px;
+      text-align: left;
+    }
+    .start-screen .feat .e { font-size: 18px; margin-bottom: 4px; }
+    .start-screen .feat .t { font-size: 12px; font-weight: 600; }
+    .start-screen .feat .d { font-size: 11px; color: rgba(255,255,255,0.5); margin-top: 2px; line-height: 1.4; }
+    .start-screen .err {
+      color: #ff6b6b;
+      font-size: 13px;
+      margin-top: 16px;
+      max-width: 320px;
+    }
+    .start-screen .loading {
+      display: none;
+      flex-direction: column;
+      align-items: center; gap: 12px;
+      color: rgba(255,255,255,0.7);
+      font-size: 13px;
+    }
+    .start-screen .loading.show { display: flex; }
+    .start-screen .spinner {
+      width: 24px; height: 24px;
+      border: 2px solid rgba(255,255,255,0.2);
+      border-top-color: #00d4aa;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* === Review Modal === */
+    .review {
+      position: absolute; inset: 0;
+      background: #000;
+      z-index: 200;
+      display: none;
+      flex-direction: column;
+    }
+    .review.show { display: flex; }
+    .review img {
+      flex: 1;
+      width: 100%;
+      object-fit: contain;
+      background: #000;
+    }
+    .review .bar {
+      padding: 16px;
+      padding-bottom: max(16px, env(safe-area-inset-bottom));
+      display: flex; align-items: center; justify-content: space-between;
+      background: #111;
+    }
+    .review .bar .left, .review .bar .right {
+      display: flex; gap: 10px;
+    }
+    .review .btn {
+      padding: 10px 18px;
+      border-radius: 100px;
+      background: rgba(255,255,255,0.1);
+      color: #fff;
+      font-size: 14px;
+      border: none;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .review .btn.primary {
+      background: linear-gradient(135deg, #00d4aa, #00b894);
+      color: #000;
+    }
+    .review .report {
+      background: #0a0a0f;
+      padding: 14px 16px;
+      border-top: 1px solid #222;
+      max-height: 40vh;
+      overflow-y: auto;
+    }
+    .review .report h3 {
+      font-size: 14px;
+      margin-bottom: 10px;
+      color: #00d4aa;
+    }
+    .review .report .row {
+      display: flex; justify-content: space-between;
+      padding: 6px 0;
+      font-size: 13px;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    .review .report .row:last-child { border-bottom: none; }
+    .review .report .row .k { color: rgba(255,255,255,0.6); }
+    .review .report .row .v { font-weight: 600; }
+    .review .report .row .v.good { color: #00d4aa; }
+    .review .report .row .v.warn { color: #ffc857; }
+    .review .report .row .v.bad  { color: #ff6b6b; }
+
+    /* === Toast === */
+    .toast {
+      position: absolute;
+      bottom: 240px; left: 50%; transform: translateX(-50%);
+      padding: 8px 16px;
+      background: rgba(0,0,0,0.75);
+      border-radius: 8px;
+      font-size: 13px;
+      z-index: 300;
+      opacity: 0;
+      transition: opacity 0.3s;
+      pointer-events: none;
+    }
+    .toast.show { opacity: 1; }
+
+    /* === Voice Button indicator === */
+    .voice-dot {
+      position: absolute;
+      top: 80px; left: 12px;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #00d4aa;
+      box-shadow: 0 0 8px #00d4aa;
+      animation: voice-pulse 1s infinite;
+      z-index: 10;
+      display: none;
+    }
+    .voice-dot.show { display: block; }
+    @keyframes voice-pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(1.4); }
+    }
+  </style>
+</head>
+<body>
+  <div class="app" id="app">
+
+    <!-- Permission/Start Screen -->
+    <div class="start-screen" id="startScreen">
+      <div class="logo">◈</div>
+      <h1>AI 摄影导师</h1>
+      <p>实时分析你的取景画面，从构图、光线、姿态等维度给出语音 + AR 视觉引导，让每个人都能一次成片。</p>
+      <button class="start-btn" id="startBtn">开启摄像头</button>
+      <div class="loading" id="loading">
+        <div class="spinner"></div>
+        <div id="loadingText">正在准备 AI 模型...</div>
+      </div>
+      <div class="err" id="errText"></div>
+      <div class="features">
+        <div class="feat">
+          <div class="e">◧</div>
+          <div class="t">智能构图</div>
+          <div class="d">三分法 · 黄金比例 · 主体居中</div>
+        </div>
+        <div class="feat">
+          <div class="e">☀</div>
+          <div class="t">光线判断</div>
+          <div class="d">逆光 · 过曝 · 暗光检测</div>
+        </div>
+        <div class="feat">
+          <div class="e">☺</div>
+          <div class="t">表情引导</div>
+          <div class="d">人脸检测 · 微笑提示</div>
+        </div>
+        <div class="feat">
+          <div class="e">◐</div>
+          <div class="t">姿态引导</div>
+          <div class="d">头部倾斜 · 端正面部</div>
+        </div>
+        <div class="feat">
+          <div class="e">▦</div>
+          <div class="t">背景识别</div>
+          <div class="d">杂乱度 · 简洁度评估</div>
+        </div>
+        <div class="feat">
+          <div class="e">♫</div>
+          <div class="t">语音播报</div>
+          <div class="d">所见即所得的实时指导</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Camera Stage -->
+    <div class="stage" id="stage" style="display:none;">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="overlay"></canvas>
+
+      <div class="voice-dot" id="voiceDot"></div>
+
+      <!-- Top Bar -->
+      <div class="top-bar">
+        <button class="icon-btn" id="backBtn" title="返回">‹</button>
+        <div class="top-score">
+          <div class="ring" id="topRing" data-n="--"> </div>
+          <div>
+            <div class="label">综合评分</div>
+            <div class="verdict" id="topVerdict">准备中</div>
+          </div>
+        </div>
+        <button class="icon-btn" id="voiceBtn" title="语音">🔊</button>
+      </div>
+
+      <!-- HUD message -->
+      <div class="hud-msg" id="hudMsg"><span class="icon">◉</span><span id="hudText">正在分析...</span></div>
+
+      <!-- Sub Scores -->
+      <div class="sub-scores">
+        <div class="sub-pill" id="pill-comp"><span class="lbl">构图</span><span class="val">--</span></div>
+        <div class="sub-pill" id="pill-light"><span class="lbl">光线</span><span class="val">--</span></div>
+        <div class="sub-pill" id="pill-face"><span class="lbl">表情</span><span class="val">--</span></div>
+        <div class="sub-pill" id="pill-stable"><span class="lbl">稳定度</span><span class="val">--</span></div>
+        <div class="sub-pill" id="pill-bg"><span class="lbl">背景</span><span class="val">--</span></div>
+      </div>
+
+      <!-- Mode selector -->
+      <div class="modes">
+        <div class="mode active" data-mode="portrait">人像</div>
+        <div class="mode" data-mode="landscape">风景</div>
+        <div class="mode" data-mode="food">静物</div>
+        <div class="mode" data-mode="auto">自动</div>
+      </div>
+
+      <!-- Bottom Bar -->
+      <div class="bottom-bar">
+        <button class="gallery-btn empty" id="galleryBtn" title="相册">🖼</button>
+        <button class="shutter" id="shutter" title="拍照"></button>
+        <button class="flip-btn" id="flipBtn" title="翻转">⟳</button>
+      </div>
+    </div>
+
+    <!-- Review Modal -->
+    <div class="review" id="review">
+      <img id="reviewImg" alt="预览">
+      <div class="report" id="report"></div>
+      <div class="bar">
+        <div class="left">
+          <button class="btn" id="reviewClose">关闭</button>
+        </div>
+        <div class="right">
+          <button class="btn" id="reviewAgain">再拍一张</button>
+          <button class="btn primary" id="reviewSave">保存到本地</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+  </div>
+
+  <script>
+  (function() {
+    'use strict';
+
+    // ============== Config ==============
+    const CONFIG = {
+      ANALYSIS_INTERVAL_MS: 250,    // analysis throttle
+      VOICE_COOLDOWN_MS: 2500,      // min time between voice messages
+      SCORE_HOLD_MS: 1500,          // hold time on a stable score before announcing
+      MODEL_URL: 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model',
+      DETECTION_INPUT_SIZE: 320,    // tiny detector input size
+      DETECTION_SCORE_THRESHOLD: 0.4,
+      // Expression model
+      SMILE_THRESHOLD: 0.55,        // happy probability >= this counts as smile
+      // Head pose
+      HEAD_TILT_WARN_DEG: 8,        // warn when |roll| > 8 deg
+      HEAD_TILT_BAD_DEG: 18,        // bad when |roll| > 18 deg
+      // Background clutter (edge density)
+      CLUTTER_GOOD_MAX: 0.18,       // <= 0.18 is clean
+      CLUTTER_BAD_MIN: 0.32         // >= 0.32 is messy
+    };
+
+    // ============== DOM ==============
+    const $ = (id) => document.getElementById(id);
+    const startScreen = $('startScreen');
+    const startBtn = $('startBtn');
+    const loading = $('loading');
+    const loadingText = $('loadingText');
+    const errText = $('errText');
+    const stage = $('stage');
+    const video = $('video');
+    const overlay = $('overlay');
+    const ctx = overlay.getContext('2d');
+    const topRing = $('topRing');
+    const topVerdict = $('topVerdict');
+    const hudMsg = $('hudMsg');
+    const hudText = $('hudText');
+    const voiceBtn = $('voiceBtn');
+    const voiceDot = $('voiceDot');
+    const flipBtn = $('flipBtn');
+    const shutter = $('shutter');
+    const galleryBtn = $('galleryBtn');
+    const backBtn = $('backBtn');
+    const pillComp = $('pill-comp');
+    const pillLight = $('pill-light');
+    const pillFace = $('pill-face');
+    const pillStable = $('pill-stable');
+    const pillBg = $('pill-bg');
+    const review = $('review');
+    const reviewImg = $('reviewImg');
+    const report = $('report');
+    const reviewClose = $('reviewClose');
+    const reviewAgain = $('reviewAgain');
+    const reviewSave = $('reviewSave');
+    const toast = $('toast');
+
+    // ============== State ==============
+    const state = {
+      stream: null,
+      facingMode: 'environment',
+      voiceEnabled: true,
+      mode: 'portrait',
+      lastVoiceAt: 0,
+      lastAnnouncedScore: -1,
+      lastAnalysisAt: 0,
+      scores: { comp: 0, light: 0, face: 0, stable: 0, bg: 0, total: 0 },
+      face: null,            // last detected face
+      prevFrame: null,       // for stability
+      cameraShake: 0,        // 0..1
+      autoReadyAt: 0,        // moment the total score reached 85+ for "ready" announcement
+      detector: null,
+      detectorReady: false,
+      landmarksReady: false,
+      expressionsReady: false,
+      analyzerCanvas: null,  // offscreen canvas for analysis
+      analyzerCtx: null,
+      lastFaces: [],
+      lastShutterAt: 0,
+      lastGallery: null,
+      // New metrics
+      smileProb: 0,          // 0..1, happy probability
+      headRollDeg: 0,        // head roll angle in degrees
+      edgeDensity: 0,        // 0..1, background clutter proxy
+      lastTipKey: ''         // to throttle voice hints
+    };
+
+    // ============== Utility ==============
+    function showToast(msg, ms = 1800) {
+      toast.textContent = msg;
+      toast.classList.add('show');
+      clearTimeout(showToast._t);
+      showToast._t = setTimeout(() => toast.classList.remove('show'), ms);
+    }
+
+    function setHudMessage(text, kind = '') {
+      hudText.textContent = text;
+      hudMsg.className = 'hud-msg show ' + kind;
+      clearTimeout(setHudMessage._t);
+      setHudMessage._t = setTimeout(() => {
+        hudMsg.classList.remove('show');
+      }, 3000);
+    }
+
+    function speak(text) {
+      if (!state.voiceEnabled) return;
+      if (!('speechSynthesis' in window)) return;
+      const now = Date.now();
+      if (now - state.lastVoiceAt < CONFIG.VOICE_COOLDOWN_MS) return;
+      state.lastVoiceAt = now;
+      try {
+        speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(text);
+        u.lang = 'zh-CN';
+        u.rate = 1.0;
+        u.pitch = 1.0;
+        u.volume = 0.9;
+        speechSynthesis.speak(u);
+        voiceDot.classList.add('show');
+        clearTimeout(speak._t);
+        speak._t = setTimeout(() => voiceDot.classList.remove('show'), 1800);
+      } catch (e) { /* ignore */ }
+    }
+
+    function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+    function setRing(el, score) {
+      const v = clamp(Math.round(score), 0, 100);
+      el.style.setProperty('--p', v + '%');
+      el.setAttribute('data-n', v);
+    }
+
+    function setPill(pill, score, good = 80, bad = 50) {
+      pill.querySelector('.val').textContent = Math.round(score);
+      pill.classList.remove('s-ok', 's-warn', 's-bad');
+      if (score >= good) pill.classList.add('s-ok');
+      else if (score >= bad) pill.classList.add('s-warn');
+      else pill.classList.add('s-bad');
+    }
+
+    // ============== Permissions / Camera ==============
+    async function startCamera() {
+      try {
+        // Pre-check: secure context (HTTPS or localhost required for getUserMedia)
+        if (!window.isSecureContext) {
+          const isLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+          if (!isLocal) {
+            const httpsUrl = window.location.href.replace(/^http:/, 'https:');
+            errText.innerHTML = '当前是 HTTP 协议，浏览器拒绝授权摄像头。<br><br>' +
+              '👉 请改用 HTTPS 链接：<br>' +
+              '<a href="' + httpsUrl + '" style="color:#00d4aa;font-weight:600;word-break:break-all;">' + httpsUrl + '</a>' +
+              '<br><br><span style="color:#aaa;font-size:12px;">（如 GitHub Pages 部署尚未上线，请确认链接是 https:// 开头）</span>';
+            startBtn.disabled = false;
+            startBtn.style.display = 'inline-block';
+            loading.classList.remove('show');
+            return;
+          }
+        }
+        // Pre-check: mediaDevices API exists
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          errText.innerHTML = '当前浏览器不支持 getUserMedia API（可能版本太旧或被禁用）。<br>请使用最新版 Chrome / Safari / Edge。';
+          startBtn.disabled = false;
+          startBtn.style.display = 'inline-block';
+          loading.classList.remove('show');
+          return;
+        }
+        if (state.stream) {
+          state.stream.getTracks().forEach(t => t.stop());
+          state.stream = null;
+        }
+        const constraints = {
+          audio: false,
+          video: {
+            facingMode: { ideal: state.facingMode },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 }
+          }
+        };
+        state.stream = await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject = state.stream;
+        await new Promise((res) => {
+          if (video.readyState >= 2) return res();
+          video.onloadedmetadata = () => res();
+        });
+        await video.play();
+        // Resize overlay canvas to match video
+        resizeOverlay();
+        window.addEventListener('resize', resizeOverlay);
+        // Start analysis loop
+        requestAnimationFrame(analyzeLoop);
+        // Hide start screen
+        startScreen.classList.add('hide');
+        stage.style.display = 'block';
+      } catch (err) {
+        console.error(err);
+        errText.textContent = '无法访问摄像头：' + (err.message || err.name) + '。请确保已授予权限并使用 HTTPS 或 localhost。';
+      }
+    }
+
+    function resizeOverlay() {
+      const w = video.videoWidth || 1280;
+      const h = video.videoHeight || 720;
+      overlay.width = w;
+      overlay.height = h;
+      // For performance analysis we use a small canvas
+      if (!state.analyzerCanvas) {
+        state.analyzerCanvas = document.createElement('canvas');
+        state.analyzerCtx = state.analyzerCanvas.getContext('2d', { willReadFrequently: true });
+      }
+      const aw = 160;
+      const ah = Math.round(aw * h / w);
+      state.analyzerCanvas.width = aw;
+      state.analyzerCanvas.height = ah;
+    }
+
+    // ============== Face Detection ==============
+    async function loadFaceModel() {
+      loadingText.textContent = '正在加载 AI 模型 (首次约 4MB)...';
+      try {
+        // Load face-api.js dynamically
+        if (!window.faceapi) {
+          await new Promise((res, rej) => {
+            const s = document.createElement('script');
+            s.src = 'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js';
+            s.onload = res;
+            s.onerror = () => rej(new Error('face-api.js 加载失败，请检查网络'));
+            document.head.appendChild(s);
+          });
+        }
+        // Try to load all three models in parallel
+        const tasks = [
+          window.faceapi.nets.tinyFaceDetector.loadFromUri(CONFIG.MODEL_URL)
+            .then(() => { state.detectorReady = true; })
+            .catch(() => { state.detectorReady = false; }),
+          window.faceapi.nets.faceLandmark68Net.loadFromUri(CONFIG.MODEL_URL)
+            .then(() => { state.landmarksReady = true; })
+            .catch(() => { state.landmarksReady = false; }),
+          window.faceapi.nets.faceExpressionNet.loadFromUri(CONFIG.MODEL_URL)
+            .then(() => { state.expressionsReady = true; })
+            .catch(() => { state.expressionsReady = false; })
+        ];
+        await Promise.all(tasks);
+        const parts = [];
+        if (state.detectorReady) parts.push('人脸');
+        if (state.landmarksReady) parts.push('关键点');
+        if (state.expressionsReady) parts.push('表情');
+        loadingText.textContent = parts.length
+          ? '模型加载完成 (' + parts.join(' / ') + ')'
+          : '模型加载失败，将使用降级分析';
+      } catch (e) {
+        console.warn('Face model failed, using fallback:', e);
+        state.detectorReady = false;
+        state.landmarksReady = false;
+        state.expressionsReady = false;
+        loadingText.textContent = '人脸检测不可用，将使用其他分析';
+      }
+    }
+
+    async function detectFaces() {
+      if (!state.detectorReady) return [];
+      try {
+        const opts = new window.faceapi.TinyFaceDetectorOptions({
+          inputSize: CONFIG.DETECTION_INPUT_SIZE,
+          scoreThreshold: CONFIG.DETECTION_SCORE_THRESHOLD
+        });
+        let chain = window.faceapi.detectAllFaces(video, opts);
+        if (state.landmarksReady) chain = chain.withFaceLandmarks();
+        if (state.expressionsReady) chain = chain.withFaceExpressions();
+        const result = await chain;
+        return result || [];
+      } catch (e) {
+        return [];
+      }
+    }
+
+    // ============== Frame Analysis ==============
+    function analyzeFrame() {
+      if (!state.analyzerCtx) return null;
+      const w = state.analyzerCanvas.width;
+      const h = state.analyzerCanvas.height;
+      state.analyzerCtx.drawImage(video, 0, 0, w, h);
+      const data = state.analyzerCtx.getImageData(0, 0, w, h).data;
+      // 1) Average brightness
+      let sum = 0, sumSq = 0, n = 0;
+      // 2) Top half vs bottom half brightness (backlight proxy)
+      let topSum = 0, topN = 0, botSum = 0, botN = 0;
+      // 3) Center region brightness (subject proxy)
+      const cx = w / 2, cy = h / 2;
+      const cw = w / 3, ch = h / 3;
+      let centerSum = 0, centerN = 0;
+      // 4) Edges - corners brightness
+      let edgeSum = 0, edgeN = 0;
+      const edgeW = Math.floor(w * 0.15);
+      // 5) Edge density (background clutter) - count of pixels with strong local gradient
+      let edgeCount = 0, edgeSamples = 0;
+      const gradThresh = 38;
+      // Helper to read luminance at (x,y)
+      const lumAt = (x, y) => {
+        const i = (y * w + x) * 4;
+        return 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      };
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const i = (y * w + x) * 4;
+          const r = data[i], g = data[i + 1], b = data[i + 2];
+          // Luminance
+          const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+          sum += lum;
+          sumSq += lum * lum;
+          n++;
+          if (y < h / 2) { topSum += lum; topN++; }
+          else { botSum += lum; botN++; }
+          if (Math.abs(x - cx) < cw && Math.abs(y - cy) < ch) { centerSum += lum; centerN++; }
+          if (x < edgeW || x > w - edgeW || y < edgeW || y > h - edgeW) { edgeSum += lum; edgeN++; }
+          // Edge density: sample every other pixel on a sparse grid
+          if ((x & 1) === 0 && (y & 1) === 0 && x > 0 && x < w - 1 && y > 0 && y < h - 1) {
+            const c = lumAt(x, y);
+            const left = lumAt(x - 1, y);
+            const right = lumAt(x + 1, y);
+            const up = lumAt(x, y - 1);
+            const down = lumAt(x, y + 1);
+            const grad = Math.abs(right - left) + Math.abs(down - up);
+            if (grad > gradThresh) edgeCount++;
+            edgeSamples++;
+          }
+        }
+      }
+      const avg = sum / n;
+      const variance = sumSq / n - avg * avg;
+      const std = Math.sqrt(variance);
+      const topAvg = topSum / topN;
+      const botAvg = botSum / botN;
+      const centerAvg = centerSum / centerN;
+      const edgeAvg = edgeSum / edgeN;
+      const edgeDensity = edgeSamples > 0 ? edgeCount / edgeSamples : 0;
+
+      return {
+        avg,            // 0..255
+        std,            // contrast
+        topAvg,
+        botAvg,
+        centerAvg,
+        edgeAvg,
+        edgeDensity,    // 0..1
+        width: w, height: h
+      };
+    }
+
+    // Stability: frame-to-frame difference on small image
+    function calcStability() {
+      if (!state.analyzerCtx) return 0;
+      const w = state.analyzerCanvas.width;
+      const h = state.analyzerCanvas.height;
+      const data = state.analyzerCtx.getImageData(0, 0, w, h).data;
+      if (!state.prevFrame || state.prevFrame.length !== data.length) {
+        state.prevFrame = new Uint8ClampedArray(data);
+        return 0;
+      }
+      let diff = 0;
+      // sample every 8th pixel for speed
+      for (let i = 0; i < data.length; i += 32) {
+        diff += Math.abs(data[i] - state.prevFrame[i]);
+      }
+      const samples = data.length / 32;
+      const avgDiff = diff / samples;
+      state.prevFrame.set(data);
+      // Map diff to stability score (lower diff = more stable)
+      // avgDiff roughly 0..50; map 0->100, 30->0
+      return clamp(100 - (avgDiff / 30) * 100, 0, 100);
+    }
+
+    // ============== AR Overlay Rendering ==============
+    function clearOverlay() {
+      ctx.clearRect(0, 0, overlay.width, overlay.height);
+    }
+
+    function drawGrid() {
+      const w = overlay.width, h = overlay.height;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([6, 4]);
+      // Vertical lines
+      for (let i = 1; i < 3; i++) {
+        ctx.beginPath();
+        ctx.moveTo(w * i / 3, 0);
+        ctx.lineTo(w * i / 3, h);
+        ctx.stroke();
+      }
+      // Horizontal lines
+      for (let i = 1; i < 3; i++) {
+        ctx.beginPath();
+        ctx.moveTo(0, h * i / 3);
+        ctx.lineTo(w, h * i / 3);
+        ctx.stroke();
+      }
+      // Center crosshair
+      ctx.setLineDash([]);
+      ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+      ctx.beginPath();
+      ctx.moveTo(w/2 - 12, h/2); ctx.lineTo(w/2 + 12, h/2);
+      ctx.moveTo(w/2, h/2 - 12); ctx.lineTo(w/2, h/2 + 12);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawLevel(roll) {
+      // roll: -1..1 (negative = tilt left, positive = tilt right)
+      if (Math.abs(roll) < 0.04) return; // level enough
+      const w = overlay.width, h = overlay.height;
+      const cx = w / 2, cy = h / 2;
+      const len = Math.min(w, h) * 0.4;
+      const angle = roll * 0.6; // radians
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(angle);
+      ctx.strokeStyle = 'rgba(255, 200, 87, 0.85)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(-len, 0); ctx.lineTo(len, 0);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(255, 200, 87, 0.85)';
+      ctx.beginPath(); ctx.arc(0, 0, 6, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+
+    function drawFaceBoxes(faces) {
+      const w = overlay.width, h = overlay.height;
+      const vw = video.videoWidth || w;
+      const vh = video.videoHeight || h;
+      const scaleX = w / vw, scaleY = h / vh;
+      ctx.save();
+      ctx.strokeStyle = '#00d4aa';
+      ctx.lineWidth = 3;
+      faces.forEach(f => {
+        const b = f.box || f.detection.box;
+        if (!b) return;
+        const x = b.x * scaleX, y = b.y * scaleY;
+        const bw = b.width * scaleX, bh = b.height * scaleY;
+        // Rounded rect
+        const r = 8;
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + bw - r, y);
+        ctx.quadraticCurveTo(x + bw, y, x + bw, y + r);
+        ctx.lineTo(x + bw, y + bh - r);
+        ctx.quadraticCurveTo(x + bw, y + bh, x + bw - r, y + bh);
+        ctx.lineTo(x + r, y + bh);
+        ctx.quadraticCurveTo(x, y + bh, x, y + bh - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
+        ctx.stroke();
+        // label
+        ctx.fillStyle = '#00d4aa';
+        ctx.font = '16px sans-serif';
+        const score = f.score || (f.detection && f.detection.score) || 0;
+        ctx.fillText('人脸 ' + Math.round(score * 100) + '%', x, y - 6);
+      });
+      ctx.restore();
+    }
+
+    function drawCompass(dx, dy) {
+      // dx, dy in -1..1 (offset from center)
+      if (Math.abs(dx) < 0.06 && Math.abs(dy) < 0.06) return;
+      const w = overlay.width, h = overlay.height;
+      const cx = w / 2, cy = h / 2;
+      const r = Math.min(w, h) * 0.18;
+      // Target position
+      const tx = cx + dx * w * 0.3;
+      const ty = cy + dy * h * 0.3;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255, 200, 87, 0.9)';
+      ctx.lineWidth = 3;
+      // Circle at target
+      ctx.beginPath();
+      ctx.arc(tx, ty, r, 0, Math.PI * 2);
+      ctx.stroke();
+      // Crosshair
+      ctx.beginPath();
+      ctx.moveTo(tx - r * 0.5, ty); ctx.lineTo(tx + r * 0.5, ty);
+      ctx.moveTo(tx, ty - r * 0.5); ctx.lineTo(tx, ty + r * 0.5);
+      ctx.stroke();
+      // Arrow from center to target
+      const ang = Math.atan2(ty - cy, tx - cx);
+      const ax = cx + Math.cos(ang) * r * 0.7;
+      const ay = cy + Math.sin(ang) * r * 0.7;
+      ctx.strokeStyle = 'rgba(255, 200, 87, 0.7)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.moveTo(cx, cy); ctx.lineTo(ax, ay);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // Direction hint
+      let hint = '';
+      if (dx < -0.06) hint += '往左移 ';
+      else if (dx > 0.06) hint += '往右移 ';
+      if (dy < -0.06) hint += '往上移';
+      else if (dy > 0.06) hint += '往下移';
+      if (hint) {
+        ctx.fillStyle = 'rgba(255, 200, 87, 0.95)';
+        ctx.font = 'bold 20px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(hint.trim(), w / 2, h - 80);
+        ctx.textAlign = 'start';
+      }
+      ctx.restore();
+    }
+
+    // ============== Score computation ==============
+    // Extract smile (happy) probability from the largest face
+    function getSmileProb(faces) {
+      if (!faces || faces.length === 0) return 0;
+      const best = pickLargestFace(faces);
+      if (!best || !best.expressions) return 0;
+      return best.expressions.happy || 0;
+    }
+
+    // Estimate head roll (left/right tilt) in degrees from 68-landmark eyes
+    function getHeadRollDeg(faces) {
+      if (!faces || faces.length === 0) return 0;
+      const best = pickLargestFace(faces);
+      if (!best || !best.landmarks) return 0;
+      const leftEye = best.landmarks.getLeftEye();
+      const rightEye = best.landmarks.getRightEye();
+      if (!leftEye || !rightEye || leftEye.length < 1 || rightEye.length < 1) return 0;
+      const cx = (a) => a.reduce((s, p) => s + p.x, 0) / a.length;
+      const cy = (a) => a.reduce((s, p) => s + p.y, 0) / a.length;
+      const dx = cx(rightEye) - cx(leftEye);
+      const dy = cy(rightEye) - cy(leftEye);
+      return Math.atan2(dy, dx) * 180 / Math.PI;
+    }
+
+    function pickLargestFace(faces) {
+      let best = null, bestArea = 0;
+      for (const f of faces) {
+        const b = f.box || (f.detection && f.detection.box);
+        if (!b) continue;
+        const a = b.width * b.height;
+        if (a > bestArea) { bestArea = a; best = f; }
+      }
+      return best;
+    }
+
+    function computeScores(metrics, faces, stability) {
+      const s = { comp: 0, light: 0, face: 0, stable: 0, bg: 0, total: 0 };
+      // --- Light score ---
+      // Ideal avg 90-150, penalize over 200 (overexposed) or under 40 (too dark)
+      const avg = metrics.avg;
+      let lightScore = 100;
+      if (avg < 30) lightScore = 30;
+      else if (avg < 60) lightScore = 50 + (avg - 30) * (40 / 30);
+      else if (avg <= 150) lightScore = 100;
+      else if (avg <= 200) lightScore = 100 - (avg - 150) * (40 / 50);
+      else lightScore = 50 - clamp((avg - 200) / 2, 0, 50);
+      // Backlight penalty
+      const backlight = (metrics.topAvg - metrics.botAvg) / 80; // positive if sky bright
+      if (backlight > 0.3) lightScore -= (backlight - 0.3) * 50;
+      s.light = clamp(lightScore, 0, 100);
+
+      // --- Composition score ---
+      let compScore = 60; // base
+      const best = pickLargestFace(faces);
+      if (best) {
+        const vw = video.videoWidth || 1280;
+        const vh = video.videoHeight || 720;
+        const b = best.box || best.detection.box;
+        const fcx = (b.x + b.width / 2) / vw; // 0..1
+        const fcy = (b.y + b.height / 2) / vh;
+        // Ideal: on third lines
+        const idealX = fcx < 0.5 ? 1/3 : 2/3;
+        const xErr = Math.abs(fcx - idealX);
+        const yErr = Math.abs(fcy - 1/3);
+        // Closer to thirds = better
+        compScore = 100 - Math.min(50, xErr * 80 + yErr * 60);
+        // Subject size: face should be 15-45% of frame
+        const ratio = (b.width * b.height) / (vw * vh);
+        if (ratio < 0.02) compScore -= 15;
+        else if (ratio > 0.20) compScore -= 10;
+        else compScore += 5;
+        s.face = 100; // face detected
+        state.face = { x: fcx, y: fcy, w: b.width / vw, h: b.height / vh };
+      } else {
+        // No face - check center brightness
+        const sub = (metrics.centerAvg - metrics.edgeAvg) / 80;
+        compScore = 60 + clamp(sub * 30, -30, 30);
+        s.face = 0;
+        state.face = null;
+      }
+      s.comp = clamp(compScore, 0, 100);
+
+      // --- Stability ---
+      s.stable = stability;
+
+      // --- Background clutter score (edge density, lower is cleaner) ---
+      const ed = metrics.edgeDensity || 0;
+      state.edgeDensity = ed;
+      let bgScore = 100;
+      if (ed <= CONFIG.CLUTTER_GOOD_MAX) bgScore = 100;
+      else if (ed >= CONFIG.CLUTTER_BAD_MIN) bgScore = 30;
+      else {
+        // linear interpolation between GOOD_MAX and BAD_MIN
+        const t = (ed - CONFIG.CLUTTER_GOOD_MAX) / (CONFIG.CLUTTER_BAD_MIN - CONFIG.CLUTTER_GOOD_MAX);
+        bgScore = 100 - t * 70;
+      }
+      s.bg = clamp(bgScore, 0, 100);
+
+      // --- Total (weighted) ---
+      // Only include face sub-score in portrait mode; otherwise the bg weight is a bit higher
+      const inPortrait = state.mode === 'portrait';
+      if (inPortrait) {
+        s.total = s.comp * 0.30 + s.light * 0.25 + s.face * 0.15 + s.stable * 0.10 + s.bg * 0.20;
+      } else {
+        s.total = s.comp * 0.30 + s.light * 0.25 + s.stable * 0.15 + s.bg * 0.30;
+      }
+      return s;
+    }
+
+    // ============== Analysis Loop ==============
+    let analyzing = false;
+    async function analyzeLoop() {
+      if (analyzing) return;
+      analyzing = true;
+      try {
+        const now = performance.now();
+        if (now - state.lastAnalysisAt >= CONFIG.ANALYSIS_INTERVAL_MS) {
+          state.lastAnalysisAt = now;
+          const metrics = analyzeFrame();
+          if (metrics) {
+            // Face detection (less frequent because landmarks + expressions are heavy)
+            let faces = state.lastFaces;
+            state._frameCount = (state._frameCount || 0) + 1;
+            if (state.detectorReady && state._frameCount % 4 === 0) {
+              faces = await detectFaces();
+              state.lastFaces = faces;
+              // Cache smile + head pose for overlay use
+              state.smileProb = getSmileProb(faces);
+              state.headRollDeg = getHeadRollDeg(faces);
+            }
+            const stability = calcStability();
+            const scores = computeScores(metrics, faces, stability);
+            state.scores = scores;
+            renderScores(scores, faces);
+            // Auto-capture logic: don't auto-capture to be safe; let user press
+          }
+        }
+      } catch (e) {
+        console.error('Analysis error:', e);
+      } finally {
+        analyzing = false;
+        requestAnimationFrame(analyzeLoop);
+      }
+    }
+
+    // ============== HUD / Message / Voice ==============
+    let lastVerdict = '';
+    let lastVerdictAt = 0;
+    function renderScores(scores, faces) {
+      setRing(topRing, scores.total);
+      setPill(pillComp, scores.comp);
+      setPill(pillLight, scores.light);
+      setPill(pillStable, scores.stable);
+      setPill(pillBg, scores.bg);
+      // 表情 pill: 优先用 happy 概率，否则用 face 检测分
+      const smileScore = state.smileProb * 100;
+      const faceScore = scores.face;
+      const faceShown = faceScore > 0 ? (state.expressionsReady ? Math.round(smileScore) : 100) : 0;
+      const faceLabel = faceScore > 0
+        ? (state.expressionsReady
+            ? (smileScore >= 55 ? '😊' : (smileScore >= 30 ? '😐' : '😶'))
+            : '✓')
+        : '—';
+      const faceValEl = pillFace.querySelector('.val');
+      const faceLblEl = pillFace.querySelector('.lbl');
+      faceValEl.textContent = faceLabel;
+      if (faceLabel === '—') {
+        faceLblEl.textContent = '表情';
+      } else {
+        faceLblEl.textContent = state.expressionsReady ? '微笑' : '人脸';
+      }
+      pillFace.classList.remove('s-ok', 's-warn', 's-bad');
+      if (faceScore === 0) pillFace.classList.add('s-bad');
+      else if (state.expressionsReady) {
+        if (smileScore >= 75) pillFace.classList.add('s-ok');
+        else if (smileScore >= 45) pillFace.classList.add('s-warn');
+        else pillFace.classList.add('s-bad');
+      } else {
+        pillFace.classList.add('s-ok');
+      }
+
+      // Verdict
+      const v = topVerdict;
+      let verdict = '请对准主体';
+      let kind = 'warn';
+      if (scores.total >= 88) { verdict = '画面出色，按下快门！'; kind = 'good'; }
+      else if (scores.total >= 75) { verdict = '差不多了，可以拍'; kind = 'good'; }
+      else if (scores.total >= 60) { verdict = '继续调整一下'; kind = 'warn'; }
+      else { verdict = '取景待优化'; kind = 'bad'; }
+      if (verdict !== lastVerdict) {
+        v.textContent = verdict;
+        lastVerdict = verdict;
+        lastVerdictAt = Date.now();
+      }
+
+      // AR overlay
+      clearOverlay();
+      drawGrid();
+      if (faces && faces.length) drawFaceBoxes(faces);
+      // Composition guide (rule of thirds ideal)
+      if (state.face) {
+        const idealX = state.face.x < 0.5 ? 1/3 : 2/3;
+        const idealY = 1/3;
+        const dx = idealX - state.face.x;
+        const dy = idealY - state.face.y;
+        drawCompass(dx, dy);
+      }
+      // Head-tilt level indicator (only when we have landmarks)
+      if (state.landmarksReady && state.face) {
+        const rollDeg = state.headRollDeg;
+        // Normalize to -1..1 for drawLevel, then convert from degrees
+        drawLevel(clamp(rollDeg / 30, -1, 1));
+      }
+      // Live HUD message (highest priority)
+      const msg = generateLiveHint(scores, faces);
+      if (msg) {
+        const good = scores.total >= 80;
+        setHudMessage(msg, good ? 'good' : (scores.total >= 60 ? 'warn' : 'bad'));
+        // Voice announce when message changes and total is good enough
+        const key = msg;
+        if (key !== renderScores._lastKey) {
+          renderScores._lastKey = key;
+          if (good) speak(msg);
+        }
+      }
+    }
+
+    function generateLiveHint(scores, faces) {
+      // Priority order: light issues > face > composition > pose (head tilt) > smile > bg > stability
+      if (scores.light < 40) {
+        return scores.light < 25 ? '光线太暗了，找个亮一点的地方' : '光线偏暗，靠近窗户试试';
+      }
+      if (scores.light > 75 && state.mode === 'portrait' && faces.length === 0) {
+        return '背景太亮，逆光了，换个角度';
+      }
+      if (state.mode === 'portrait' && faces.length === 0) {
+        return '请对准人脸';
+      }
+      if (state.face) {
+        const fcx = state.face.x, fcy = state.face.y;
+        const idealX = fcx < 0.5 ? 1/3 : 2/3;
+        const idealY = 1/3;
+        const ddx = idealX - fcx;
+        const ddy = idealY - fcy;
+        if (Math.abs(ddx) > 0.12) {
+          return ddx > 0 ? '把人物往左挪一点' : '把人物往右挪一点';
+        }
+        if (Math.abs(ddy) > 0.1) {
+          return ddy > 0 ? '把人物往上挪一点' : '把人物往下挪一点';
+        }
+      }
+      // Head tilt (pose) warning
+      if (state.landmarksReady && state.face) {
+        const roll = Math.abs(state.headRollDeg);
+        if (roll > CONFIG.HEAD_TILT_BAD_DEG) {
+          return state.headRollDeg > 0 ? '头有点歪，往左摆正' : '头有点歪，往右摆正';
+        }
+        if (roll > CONFIG.HEAD_TILT_WARN_DEG) {
+          return '头稍微歪了，端正面部';
+        }
+      }
+      // Smile / expression (only in portrait mode)
+      if (state.mode === 'portrait' && state.expressionsReady && state.face) {
+        if (state.smileProb < 0.25) {
+          return '笑一个，更上镜';
+        }
+        if (state.smileProb > 0.85) {
+          return '表情自然，可以拍';
+        }
+      }
+      // Background clutter
+      if (scores.bg < 50) {
+        return state.edgeDensity > 0.4 ? '背景太乱了，换个简洁背景' : '背景有点杂，注意简化';
+      }
+      if (scores.stable < 40) {
+        return '手有点抖，端稳手机';
+      }
+      if (scores.total >= 88) {
+        return '画面出色，按下快门！';
+      }
+      return null;
+    }
+
+    // ============== Shutter / Capture ==============
+    async function capture() {
+      const now = Date.now();
+      if (now - state.lastShutterAt < 800) return;
+      state.lastShutterAt = now;
+      // Flash effect
+      const flash = document.createElement('div');
+      flash.style.cssText = 'position:absolute;inset:0;background:#fff;z-index:150;opacity:0;transition:opacity 0.2s;';
+      document.querySelector('.app').appendChild(flash);
+      requestAnimationFrame(() => { flash.style.opacity = '0.85'; });
+      setTimeout(() => { flash.style.opacity = '0'; }, 120);
+      setTimeout(() => { flash.remove(); }, 350);
+
+      shutter.classList.add('disabled');
+      setTimeout(() => shutter.classList.remove('disabled'), 1000);
+
+      // Capture full-resolution photo
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      const cap = document.createElement('canvas');
+      cap.width = w; cap.height = h;
+      const cctx = cap.getContext('2d');
+      // Mirror correction: if front camera mirrored on display, we keep original here
+      cctx.drawImage(video, 0, 0, w, h);
+      const dataUrl = cap.toDataURL('image/jpeg', 0.92);
+
+      // Speak
+      speak('已拍摄，综合评分 ' + Math.round(state.scores.total) + ' 分');
+
+      // Show review
+      reviewImg.src = dataUrl;
+      state.lastGallery = dataUrl;
+      galleryBtn.classList.remove('empty');
+      galleryBtn.innerHTML = '<img src="' + dataUrl + '" alt="">';
+      // Build report
+      const s = state.scores;
+      const faceCount = state.lastFaces.length;
+      const smilePct = Math.round((state.smileProb || 0) * 100);
+      const headTilt = Math.round(state.headRollDeg || 0);
+      const verdictTxt =
+        s.total >= 88 ? '出色' :
+        s.total >= 75 ? '良好' :
+        s.total >= 60 ? '一般' : '欠佳';
+      const verdictKind =
+        s.total >= 75 ? 'good' :
+        s.total >= 60 ? 'warn' : 'bad';
+      const item = (k, v, kind) =>
+        '<div class="row"><span class="k">' + k + '</span><span class="v ' + (kind || '') + '">' + v + '</span></div>';
+      let html = '<h3>📊 拍摄分析报告</h3>';
+      html += item('综合评分', Math.round(s.total) + ' / 100 · ' + verdictTxt, verdictKind);
+      html += item('构图', Math.round(s.comp) + ' / 100', s.comp >= 75 ? 'good' : (s.comp >= 55 ? 'warn' : 'bad'));
+      html += item('光线', Math.round(s.light) + ' / 100', s.light >= 75 ? 'good' : (s.light >= 55 ? 'warn' : 'bad'));
+      if (faceCount > 0) {
+        if (state.expressionsReady) {
+          const smileKind = smilePct >= 70 ? 'good' : (smilePct >= 40 ? 'warn' : 'bad');
+          const smileEmoji = smilePct >= 70 ? '😊' : (smilePct >= 40 ? '🙂' : '😐');
+          html += item('表情 / 微笑', smileEmoji + ' ' + smilePct + ' %', smileKind);
+        } else {
+          html += item('人脸', '检测到 ' + faceCount + ' 张', 'good');
+        }
+        if (state.landmarksReady) {
+          const tiltKind = Math.abs(headTilt) <= 8 ? 'good' : (Math.abs(headTilt) <= 18 ? 'warn' : 'bad');
+          html += item('姿态 / 头部倾斜', headTilt + '°', tiltKind);
+        }
+      } else {
+        html += item('人脸', '未检测到人脸', 'warn');
+      }
+      html += item('背景整洁度', Math.round(s.bg) + ' / 100', s.bg >= 75 ? 'good' : (s.bg >= 55 ? 'warn' : 'bad'));
+      html += item('稳定度', Math.round(s.stable) + ' / 100', s.stable >= 75 ? 'good' : (s.stable >= 55 ? 'warn' : 'bad'));
+      // Suggestions
+      const tips = [];
+      if (s.comp < 70 && faceCount > 0) tips.push('主体偏离三分线，建议调整位置');
+      if (s.light < 50) tips.push('光线不足，建议靠近光源');
+      if (s.stable < 50) tips.push('手持抖动较大，建议使用双手或稳定姿势');
+      if (faceCount === 0 && state.mode === 'portrait') tips.push('请将人脸对准取景框');
+      if (state.landmarksReady && Math.abs(headTilt) > 12) tips.push('头部偏斜，建议摆正');
+      if (state.expressionsReady && faceCount > 0 && smilePct < 35) tips.push('表情较严肃，可以试着微笑');
+      if (s.bg < 55) tips.push('背景较为杂乱，建议换个简洁背景');
+      if (tips.length) {
+        html += '<div style="margin-top:12px;padding-top:10px;border-top:1px solid #222;">';
+        html += '<h3 style="color:#ffc857;">💡 改进建议</h3>';
+        tips.forEach(t => { html += '<div style="font-size:12px;color:rgba(255,255,255,0.7);padding:4px 0;">· ' + t + '</div>'; });
+        html += '</div>';
+      }
+      report.innerHTML = html;
+      review.classList.add('show');
+    }
+
+    // ============== Event Bindings ==============
+    startBtn.addEventListener('click', async () => {
+      startBtn.disabled = true;
+      startBtn.style.display = 'none';
+      loading.classList.add('show');
+      errText.textContent = '';
+      try {
+        // Load model in parallel with permission request
+        const modelP = loadFaceModel();
+        await startCamera();
+        await modelP;
+      } catch (e) {
+        errText.textContent = e.message || String(e);
+        startBtn.disabled = false;
+        startBtn.style.display = 'inline-block';
+        loading.classList.remove('show');
+      }
+    });
+
+    flipBtn.addEventListener('click', async () => {
+      state.facingMode = state.facingMode === 'environment' ? 'user' : 'environment';
+      stage.classList.toggle('mirrored', state.facingMode === 'user');
+      await startCamera();
+    });
+
+    voiceBtn.addEventListener('click', () => {
+      state.voiceEnabled = !state.voiceEnabled;
+      voiceBtn.classList.toggle('active', state.voiceEnabled);
+      voiceBtn.textContent = state.voiceEnabled ? '🔊' : '🔇';
+      if (state.voiceEnabled) speak('语音引导已开启');
+    });
+    // init voice btn as active
+    voiceBtn.classList.add('active');
+
+    shutter.addEventListener('click', capture);
+
+    galleryBtn.addEventListener('click', () => {
+      if (state.lastGallery) {
+        reviewImg.src = state.lastGallery;
+        review.classList.add('show');
+      }
+    });
+
+    backBtn.addEventListener('click', () => {
+      if (state.stream) {
+        state.stream.getTracks().forEach(t => t.stop());
+        state.stream = null;
+      }
+      stage.style.display = 'none';
+      startScreen.classList.remove('hide');
+      startBtn.disabled = false;
+      startBtn.style.display = 'inline-block';
+      loading.classList.remove('show');
+    });
+
+    reviewClose.addEventListener('click', () => review.classList.remove('show'));
+    reviewAgain.addEventListener('click', () => review.classList.remove('show'));
+    reviewSave.addEventListener('click', () => {
+      if (!state.lastGallery) return;
+      const a = document.createElement('a');
+      a.href = state.lastGallery;
+      a.download = 'ai-photo-' + Date.now() + '.jpg';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      showToast('已保存到下载文件夹');
+    });
+
+    // Mode selector
+    document.querySelectorAll('.mode').forEach(m => {
+      m.addEventListener('click', () => {
+        document.querySelectorAll('.mode').forEach(x => x.classList.remove('active'));
+        m.classList.add('active');
+        state.mode = m.dataset.mode;
+        showToast('已切换到 ' + m.textContent + ' 模式');
+        if (state.voiceEnabled) speak('已切换到' + m.textContent + '模式');
+      });
+    });
+
+    // Prevent page scroll
+    document.addEventListener('touchmove', (e) => {
+      if (e.target.closest('.review .report')) return;
+      e.preventDefault();
+    }, { passive: false });
+  })();
+  </script>
+</body>
+</html>
