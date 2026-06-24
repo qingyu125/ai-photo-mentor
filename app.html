@@ -628,7 +628,8 @@
       smileProb: 0,          // 0..1, happy probability
       headRollDeg: 0,        // head roll angle in degrees
       edgeDensity: 0,        // 0..1, background clutter proxy
-      lastTipKey: ''         // to throttle voice hints
+      lastTipKey: '',        // to throttle voice hints
+      inReview: false        // true while the review modal is showing (suppresses live voice)
     };
 
     // ============== Utility ==============
@@ -664,6 +665,7 @@
     // ===== Speech Synthesis helpers (with iOS Safari unlock) =====
     let _voicesReady = false;
     let _voices = [];
+    let _voicesChangeHooked = false;
     function loadVoices() {
       if (!('speechSynthesis' in window)) return;
       _voices = window.speechSynthesis.getVoices() || [];
@@ -673,36 +675,113 @@
       if (!('speechSynthesis' in window)) { cb && cb(false); return; }
       loadVoices();
       if (_voicesReady) { cb && cb(true); return; }
-      // iOS Safari: voices load asynchronously
-      const t = setTimeout(() => { cb && cb(_voicesReady); }, 800);
-      window.speechSynthesis.addEventListener('voiceschanged', function once() {
-        window.speechSynthesis.removeEventListener('voiceschanged', once);
-        clearTimeout(t);
+      // iOS Safari: voices load asynchronously. Hook the event the first time
+      // we actually need it, then call back when voices are ready (or after a
+      // hard timeout in case the event never fires on some WebViews).
+      if (!_voicesChangeHooked) {
+        _voicesChangeHooked = true;
+        window.speechSynthesis.addEventListener('voiceschanged', () => {
+          loadVoices();
+        });
+      }
+      const start = Date.now();
+      const poll = setInterval(() => {
         loadVoices();
-        cb && cb(_voicesReady);
-      });
+        if (_voicesReady || Date.now() - start > 1500) {
+          clearInterval(poll);
+          cb && cb(_voicesReady);
+        }
+      }, 100);
     }
 
-    // iOS Safari only enables speechSynthesis after a user gesture.
-    // We call this on first user click to "unlock" it.
+    // iOS Safari only enables speechSynthesis after a user gesture. We
+    // pre-heat the audio session by speaking a real (silent) utterance from
+    // inside a click handler. We try multiple strategies because behaviour
+    // differs across iOS / Android / Chromium WebView versions.
     function unlockSpeech() {
       if (unlockSpeech._done) return;
       unlockSpeech._done = true;
+      if (!('speechSynthesis' in window)) return;
+      // Immediately try to load voices
+      loadVoices();
+      // Resume the synthesis engine (no-op on browsers that don't need it)
+      try { window.speechSynthesis.resume(); } catch (e) { /* ignore */ }
+      // Unlock via a short real Chinese utterance at volume 0.
+      // Empty/whitespace utterances are silently dropped on some iOS builds.
       try {
-        const u = new SpeechSynthesisUtterance(' ');
+        const u = new SpeechSynthesisUtterance('已开启');
         u.volume = 0;
         u.lang = 'zh-CN';
-        window.speechSynthesis.speak(u);
+        u.rate = 1.2;
+        ensureVoices((ready) => {
+          try {
+            const v = pickChineseVoice();
+            if (v) { u.voice = v; u.lang = v.lang; }
+            window.speechSynthesis.speak(u);
+          } catch (e) { /* ignore */ }
+        });
+        // Fallback if voices were already available
+        if (_voicesReady) {
+          try {
+            const v = pickChineseVoice();
+            if (v) { u.voice = v; u.lang = v.lang; }
+            window.speechSynthesis.speak(u);
+          } catch (e) { /* ignore */ }
+        }
       } catch (e) { /* ignore */ }
-      loadVoices();
+    }
+
+    // Re-arm the unlock flag so it can fire again on the next fresh gesture
+    // (e.g. user clicks the shutter many times).
+    function rearmSpeechUnlock() {
+      unlockSpeech._done = false;
     }
 
     function pickChineseVoice() {
       if (!_voices.length) return null;
-      // Prefer a zh-CN voice; fall back to any Chinese voice
+      // Prefer a zh-CN voice; fall back to any Chinese voice, then any voice.
       return _voices.find(v => /zh[-_]CN/i.test(v.lang))
           || _voices.find(v => /zh/i.test(v.lang))
           || _voices[0];
+    }
+
+    // Core speech function: builds and plays a single utterance.
+    // Used by both `salk` (throttled) and `speakForce` (immediate, bypass cooldown).
+    function _doSpeak(text) {
+      if (!('speechSynthesis' in window)) return;
+      if (!state.voiceEnabled) return;
+      try {
+        window.speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(text);
+        u.lang = 'zh-CN';
+        u.rate = 1.0;
+        u.pitch = 1.0;
+        u.volume = 1.0;
+        const attachVoice = (v) => {
+          if (v) { u.voice = v; u.lang = v.lang; }
+          try { window.speechSynthesis.speak(u); } catch (e) { /* ignore */ }
+        };
+        if (_voicesReady) {
+          attachVoice(pickChineseVoice());
+        } else {
+          // If voices aren't loaded yet, wait for them but don't block forever.
+          let spoken = false;
+          const tryNow = () => {
+            if (spoken) return;
+            spoken = true;
+            attachVoice(pickChineseVoice());
+          };
+          // iOS: also retry once after a short delay in case the engine
+          // wasn't ready when we first called speak().
+          setTimeout(tryNow, 60);
+          ensureVoices((ready) => {
+            if (ready) tryNow();
+          });
+        }
+        voiceDot.classList.add('show');
+        clearTimeout(_doSpeak._t);
+        _doSpeak._t = setTimeout(() => voiceDot.classList.remove('show'), 1800);
+      } catch (e) { /* ignore */ }
     }
 
     function speak(text) {
@@ -711,35 +790,16 @@
       const now = Date.now();
       if (now - state.lastVoiceAt < CONFIG.VOICE_COOLDOWN_MS) return;
       state.lastVoiceAt = now;
+      _doSpeak(text);
+    }
 
-      // Build a single utterance and speak it once voices are known.
-      // On iOS Safari, voices load asynchronously after `voiceschanged`.
-      // On Chrome / Edge / desktop, voices are usually available immediately.
-      const doSpeak = () => {
-        try {
-          window.speechSynthesis.cancel();
-          const u = new SpeechSynthesisUtterance(text);
-          u.lang = 'zh-CN';
-          u.rate = 1.0;
-          u.pitch = 1.0;
-          u.volume = 1.0;
-          const v = pickChineseVoice();
-          if (v) { u.voice = v; u.lang = v.lang; }
-          window.speechSynthesis.speak(u);
-        } catch (e) { /* ignore */ }
-      };
-
-      if (_voicesReady) {
-        doSpeak();
-      } else {
-        // Wait for voiceschanged, but fall back after 800ms so we don't
-        // end up silent if the event never fires (older WebViews).
-        ensureVoices((ready) => doSpeak());
-      }
-
-      voiceDot.classList.add('show');
-      clearTimeout(speak._t);
-      speak._t = setTimeout(() => voiceDot.classList.remove('show'), 1800);
+    // Force-speak (bypass cooldown). Used for the post-capture report.
+    function speakForce(text) {
+      if (!state.voiceEnabled) return;
+      if (!('speechSynthesis' in window)) return;
+      // Reset throttle so subsequent live hints are not blocked.
+      state.lastVoiceAt = Date.now();
+      _doSpeak(text);
     }
 
     function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
@@ -1343,7 +1403,8 @@
         // Normalize to -1..1 for drawLevel, then convert from degrees
         drawLevel(clamp(rollDeg / 30, -1, 1));
       }
-      // Live HUD message (highest priority)
+      // Live HUD message (highest priority) — suppressed while the review modal is open
+      if (state.inReview) return;
       const msg = generateLiveHint(scores, faces);
       if (msg) {
         const good = scores.total >= 80;
@@ -1439,8 +1500,17 @@
       cctx.drawImage(video, 0, 0, w, h);
       const dataUrl = cap.toDataURL('image/jpeg', 0.92);
 
-      // Speak
-      speak('已拍摄，综合评分 ' + Math.round(state.scores.total) + ' 分');
+      // Mark review mode FIRST so the ongoing analysis loop won't keep
+      // firing "把人往左挪一点" / "把人物往下挪一点" type live hints.
+      state.inReview = true;
+      // Stop any pending speech and reset throttle so the final report
+      // can speak immediately.
+      try { window.speechSynthesis.cancel(); } catch (e) {}
+      state.lastVoiceAt = 0;
+      renderScores._lastKey = '';   // force next live hint (when review closes) to be announced
+      state.lastTipKey = '';
+      // Hide the live HUD strip while reviewing
+      hudMsg.classList.remove('show');
 
       // Show review
       reviewImg.src = dataUrl;
@@ -1499,6 +1569,32 @@
       }
       report.innerHTML = html;
       review.classList.add('show');
+
+      // Build the final voice report (one-shot, comprehensive)
+      // Cancel any in-flight speech first so the final report isn't truncated.
+      const finalLines = [];
+      finalLines.push('已拍摄');
+      finalLines.push(verdictTxt + '，综合评分 ' + Math.round(s.total) + ' 分');
+      // Pick the 1-2 weakest sub-scores to mention as the most actionable feedback
+      const subs = [
+        { k: '构图', v: s.comp },
+        { k: '光线', v: s.light },
+        { k: '背景', v: s.bg },
+        { k: '稳定度', v: s.stable }
+      ];
+      subs.sort((a, b) => a.v - b.v);
+      for (let i = 0; i < 2; i++) {
+        if (subs[i].v < 60) finalLines.push(subs[i].k + '偏弱');
+      }
+      if (faceCount > 0 && state.expressionsReady) {
+        if (smilePct >= 70) finalLines.push('微笑自然');
+        else if (smilePct < 35) finalLines.push('可以试着微笑');
+      }
+      if (state.landmarksReady && Math.abs(headTilt) > 12) {
+        finalLines.push('头部偏斜，建议摆正');
+      }
+      // Speak the final report
+      speakForce(finalLines.join('，'));
     }
 
     // ============== Event Bindings ==============
@@ -1506,6 +1602,15 @@
       // iOS Safari requires a user gesture before speechSynthesis works.
       // Unlock it here so later voice announcements actually play.
       unlockSpeech();
+      // Make sure voice is on and play an audible test utterance INSIDE the
+      // user-gesture handler. This is the single most reliable way to
+      // activate the iOS audio session — every later speak() call (from
+      // the analysis loop) then has a working engine to draw on.
+      state.voiceEnabled = true;
+      voiceBtn.classList.add('active');
+      voiceBtn.textContent = '🔊';
+      speakForce('语音引导已开启');
+
       startBtn.disabled = true;
       startBtn.style.display = 'none';
       loading.classList.add('show');
@@ -1564,8 +1669,18 @@
       loading.classList.remove('show');
     });
 
-    reviewClose.addEventListener('click', () => review.classList.remove('show'));
-    reviewAgain.addEventListener('click', () => review.classList.remove('show'));
+    function closeReview() {
+      review.classList.remove('show');
+      // Re-enable live voice hints when leaving the review modal
+      state.inReview = false;
+      try { window.speechSynthesis.cancel(); } catch (e) {}
+      // Force the next live hint to be announced (don't suppress the first
+      // new one just because the previous key happens to match).
+      renderScores._lastKey = '';
+      state.lastTipKey = '';
+    }
+    reviewClose.addEventListener('click', closeReview);
+    reviewAgain.addEventListener('click', closeReview);
     reviewSave.addEventListener('click', async () => {
       if (!state.lastGallery) return;
       unlockSpeech(); // safety: also unlock on any user gesture
@@ -1581,6 +1696,7 @@
           if (navigator.canShare({ files: [file] })) {
             await navigator.share({ files: [file], title: 'AI 摄影' });
             showToast('已分享到相册');
+            closeReview();
             return;
           }
         } catch (e) {
@@ -1601,12 +1717,14 @@
         a.click();
         a.remove();
         showToast(isMobileDevice() ? '长按图片可保存到相册' : '已保存到下载文件夹');
+        closeReview();
       } catch (e) {
         // Last-resort fallback: open image in a new tab for manual save
         const w = window.open();
         if (w) {
           w.document.write('<title>' + filename + '</title><body style="margin:0;background:#000"><img src="' + state.lastGallery + '" style="width:100%"></body>');
           showToast('长按图片可保存到相册');
+          closeReview();
         } else {
           showToast('保存失败，请重试');
         }
