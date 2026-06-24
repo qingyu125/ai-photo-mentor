@@ -549,14 +549,21 @@
   (function() {
     'use strict';
 
+    // ============== Utility helpers (used by CONFIG) ==============
+    function isMobileUA() {
+      return /Mobi|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    }
+
     // ============== Config ==============
     const CONFIG = {
       ANALYSIS_INTERVAL_MS: 250,    // analysis throttle
       VOICE_COOLDOWN_MS: 2500,      // min time between voice messages
       SCORE_HOLD_MS: 1500,          // hold time on a stable score before announcing
       MODEL_URL: 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model',
-      DETECTION_INPUT_SIZE: 320,    // tiny detector input size
-      DETECTION_SCORE_THRESHOLD: 0.4,
+      // Mobile devices are slower at AI inference — use a smaller input and
+      // a lower score threshold so detection still fires reliably.
+      DETECTION_INPUT_SIZE: isMobileUA() ? 224 : 320,
+      DETECTION_SCORE_THRESHOLD: isMobileUA() ? 0.3 : 0.4,
       // Expression model
       SMILE_THRESHOLD: 0.55,        // happy probability >= this counts as smile
       // Head pose
@@ -649,16 +656,11 @@
       }, 3000);
     }
 
-    // Detect if running on a mobile device (affects mirror + save behavior)
-    function isMobileDevice() {
-      return /Mobi|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-    }
-
     // Determine if video should be mirrored:
     // - On PC, the webcam is always the "selfie" view, so always mirror
     // - On mobile, only mirror the front camera (user-facing)
     function shouldMirrorCamera() {
-      if (!isMobileDevice()) return true;
+      if (!isMobileUA()) return true;
       return state.facingMode === 'user';
     }
 
@@ -666,6 +668,42 @@
     let _voicesReady = false;
     let _voices = [];
     let _voicesChangeHooked = false;
+    // iOS Safari suspends the audio session shortly after a user gesture,
+    // which makes every later speechSynthesis.speak() call outside a
+    // gesture silent. We keep the session alive by playing a 0.05s silent
+    // Web Audio buffer every few seconds.
+    let _audioCtx = null;
+    let _keepAliveTimer = null;
+    function _initAudioCtx() {
+      try {
+        if (!_audioCtx) {
+          const Ctx = window.AudioContext || window.webkitAudioContext;
+          if (Ctx) _audioCtx = new Ctx();
+        }
+        if (_audioCtx && _audioCtx.state === 'suspended') {
+          _audioCtx.resume();
+        }
+      } catch (e) { /* ignore */ }
+    }
+    function _pingAudio() {
+      try {
+        _initAudioCtx();
+        if (!_audioCtx || _audioCtx.state !== 'running') return;
+        const buf = _audioCtx.createBuffer(1, Math.floor(_audioCtx.sampleRate * 0.05), _audioCtx.sampleRate);
+        const src = _audioCtx.createBufferSource();
+        src.buffer = buf;
+        src.connect(_audioCtx.destination);
+        src.start();
+      } catch (e) { /* ignore */ }
+    }
+    function startKeepAlive() {
+      if (_keepAliveTimer) return;
+      _pingAudio(); // first ping immediately
+      _keepAliveTimer = setInterval(_pingAudio, 4000);
+    }
+    function stopKeepAlive() {
+      if (_keepAliveTimer) { clearInterval(_keepAliveTimer); _keepAliveTimer = null; }
+    }
     function loadVoices() {
       if (!('speechSynthesis' in window)) return;
       _voices = window.speechSynthesis.getVoices() || [];
@@ -695,44 +733,38 @@
     }
 
     // iOS Safari only enables speechSynthesis after a user gesture. We
-    // pre-heat the audio session by speaking a real (silent) utterance from
-    // inside a click handler. We try multiple strategies because behaviour
-    // differs across iOS / Android / Chromium WebView versions.
+    // pre-heat the audio session by:
+    //   1) Resuming a Web Audio context (best activation method on iOS)
+    //   2) Playing a 0.05s silent buffer through it
+    //   3) Speaking a real (silent) utterance to warm up speechSynthesis
     function unlockSpeech() {
-      if (unlockSpeech._done) return;
-      unlockSpeech._done = true;
-      if (!('speechSynthesis' in window)) return;
-      // Immediately try to load voices
-      loadVoices();
-      // Resume the synthesis engine (no-op on browsers that don't need it)
-      try { window.speechSynthesis.resume(); } catch (e) { /* ignore */ }
-      // Unlock via a short real Chinese utterance at volume 0.
-      // Empty/whitespace utterances are silently dropped on some iOS builds.
+      if (!('speechSynthesis' in window) && !(_audioCtx)) {
+        try { _initAudioCtx(); } catch (e) {}
+        if (!_audioCtx) return;
+      }
+      // 1) Wake up the Web Audio context
+      try { _initAudioCtx(); } catch (e) { /* ignore */ }
+      // 2) Play a silent ping right now (must be inside the user gesture)
+      _pingAudio();
+      // 3) Schedule periodic pings to keep the session alive between gestures
+      startKeepAlive();
+      // 4) Speak a real short Chinese utterance to warm up speechSynthesis
       try {
-        const u = new SpeechSynthesisUtterance('已开启');
+        const u = new SpeechSynthesisUtterance(' ');
         u.volume = 0;
         u.lang = 'zh-CN';
-        u.rate = 1.2;
-        ensureVoices((ready) => {
+        const speakIt = () => {
           try {
             const v = pickChineseVoice();
             if (v) { u.voice = v; u.lang = v.lang; }
             window.speechSynthesis.speak(u);
           } catch (e) { /* ignore */ }
-        });
-        // Fallback if voices were already available
-        if (_voicesReady) {
-          try {
-            const v = pickChineseVoice();
-            if (v) { u.voice = v; u.lang = v.lang; }
-            window.speechSynthesis.speak(u);
-          } catch (e) { /* ignore */ }
-        }
+        };
+        if (_voicesReady) speakIt();
+        else ensureVoices((ready) => { if (ready) speakIt(); });
       } catch (e) { /* ignore */ }
     }
 
-    // Re-arm the unlock flag so it can fire again on the next fresh gesture
-    // (e.g. user clicks the shutter many times).
     function rearmSpeechUnlock() {
       unlockSpeech._done = false;
     }
@@ -746,7 +778,6 @@
     }
 
     // Core speech function: builds and plays a single utterance.
-    // Used by both `salk` (throttled) and `speakForce` (immediate, bypass cooldown).
     function _doSpeak(text) {
       if (!('speechSynthesis' in window)) return;
       if (!state.voiceEnabled) return;
@@ -757,9 +788,13 @@
         u.rate = 1.0;
         u.pitch = 1.0;
         u.volume = 1.0;
+        // Diagnostic events — useful when debugging iOS speech issues
+        u.onstart = () => { console.log('[voice] start:', text); voiceDot.classList.add('show'); };
+        u.onend   = () => { console.log('[voice] end:', text); };
+        u.onerror = (e) => { console.warn('[voice] error:', text, e); };
         const attachVoice = (v) => {
           if (v) { u.voice = v; u.lang = v.lang; }
-          try { window.speechSynthesis.speak(u); } catch (e) { /* ignore */ }
+          try { window.speechSynthesis.speak(u); } catch (e) { console.warn('[voice] speak() threw', e); }
         };
         if (_voicesReady) {
           attachVoice(pickChineseVoice());
@@ -773,15 +808,16 @@
           };
           // iOS: also retry once after a short delay in case the engine
           // wasn't ready when we first called speak().
-          setTimeout(tryNow, 60);
+          setTimeout(tryNow, 80);
           ensureVoices((ready) => {
             if (ready) tryNow();
           });
         }
+        // Pulse the voice dot for visual feedback
         voiceDot.classList.add('show');
         clearTimeout(_doSpeak._t);
         _doSpeak._t = setTimeout(() => voiceDot.classList.remove('show'), 1800);
-      } catch (e) { /* ignore */ }
+      } catch (e) { console.warn('[voice] outer error', e); }
     }
 
     function speak(text) {
@@ -897,45 +933,99 @@
 
     // ============== Face Detection ==============
     async function loadFaceModel() {
-      loadingText.textContent = '正在加载 AI 模型 (首次约 4MB)...';
-      try {
-        // Load face-api.js dynamically
-        if (!window.faceapi) {
-          await new Promise((res, rej) => {
-            const s = document.createElement('script');
-            s.src = 'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js';
-            s.onload = res;
-            s.onerror = () => rej(new Error('face-api.js 加载失败，请检查网络'));
-            document.head.appendChild(s);
-          });
-        }
-        // Try to load all three models in parallel
-        const tasks = [
-          window.faceapi.nets.tinyFaceDetector.loadFromUri(CONFIG.MODEL_URL)
-            .then(() => { state.detectorReady = true; })
-            .catch(() => { state.detectorReady = false; }),
-          window.faceapi.nets.faceLandmark68Net.loadFromUri(CONFIG.MODEL_URL)
-            .then(() => { state.landmarksReady = true; })
-            .catch(() => { state.landmarksReady = false; }),
-          window.faceapi.nets.faceExpressionNet.loadFromUri(CONFIG.MODEL_URL)
-            .then(() => { state.expressionsReady = true; })
-            .catch(() => { state.expressionsReady = false; })
+      loadingText.textContent = '正在加载 AI 库 (约 200KB)...';
+      // Load face-api.js library itself, with multiple CDN fallbacks.
+      if (!window.faceapi) {
+        const libSources = [
+          'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js',
+          'https://unpkg.com/face-api.js@0.22.2/dist/face-api.min.js',
+          'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.min.js',
+          'https://unpkg.com/@vladmandic/face-api/dist/face-api.min.js'
         ];
-        await Promise.all(tasks);
-        const parts = [];
-        if (state.detectorReady) parts.push('人脸');
-        if (state.landmarksReady) parts.push('关键点');
-        if (state.expressionsReady) parts.push('表情');
-        loadingText.textContent = parts.length
-          ? '模型加载完成 (' + parts.join(' / ') + ')'
-          : '模型加载失败，将使用降级分析';
-      } catch (e) {
-        console.warn('Face model failed, using fallback:', e);
-        state.detectorReady = false;
-        state.landmarksReady = false;
-        state.expressionsReady = false;
-        loadingText.textContent = '人脸检测不可用，将使用其他分析';
+        let libLoaded = false;
+        for (const src of libSources) {
+          try {
+            loadingText.textContent = '正在加载 AI 库... (' + new URL(src).hostname + ')';
+            await new Promise((res, rej) => {
+              const s = document.createElement('script');
+              s.src = src;
+              s.async = true;
+              s.onload = () => res();
+              s.onerror = () => rej(new Error('script load failed: ' + src));
+              document.head.appendChild(s);
+            });
+            if (window.faceapi) { libLoaded = true; break; }
+          } catch (e) {
+            console.warn('[ai] lib load failed:', src, e);
+          }
+        }
+        if (!libLoaded) {
+          loadingText.textContent = 'AI 库加载失败，将使用降级分析';
+          state.detectorReady = false;
+          state.landmarksReady = false;
+          state.expressionsReady = false;
+          return;
+        }
       }
+      loadingText.textContent = '正在加载 AI 模型 (首次约 4MB)...';
+      // Try multiple CDNs because some mobile networks (especially in China)
+      // can't reach jsdelivr reliably. Falling back keeps the app working.
+      const modelSources = [
+        CONFIG.MODEL_URL,
+        'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights',
+        'https://unpkg.com/face-api.js@0.22.2/weights',
+        'https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights'
+      ];
+      let loadedFrom = null;
+      for (const url of modelSources) {
+        try {
+          loadingText.textContent = '正在加载 AI 模型... (' + new URL(url).hostname + ')';
+          // Set a per-URL timeout — some CDNs hang on mobile networks
+          const timeoutMs = isMobileUA() ? 25000 : 15000;
+          const tasks = [
+            withTimeout(window.faceapi.nets.tinyFaceDetector.loadFromUri(url), timeoutMs)
+              .then(() => { state.detectorReady = true; })
+              .catch((e) => { console.warn('tinyFaceDetector load failed:', url, e); throw e; }),
+            withTimeout(window.faceapi.nets.faceLandmark68Net.loadFromUri(url), timeoutMs)
+              .then(() => { state.landmarksReady = true; })
+              .catch((e) => { console.warn('landmark load failed:', url, e); throw e; }),
+            withTimeout(window.faceapi.nets.faceExpressionNet.loadFromUri(url), timeoutMs)
+              .then(() => { state.expressionsReady = true; })
+              .catch((e) => { console.warn('expressions load failed:', url, e); throw e; })
+          ];
+          await Promise.all(tasks);
+          loadedFrom = url;
+          break;
+        } catch (e) {
+          // Reset flags so the next URL gets a clean try
+          state.detectorReady = false;
+          state.landmarksReady = false;
+          state.expressionsReady = false;
+        }
+      }
+      const parts = [];
+      if (state.detectorReady) parts.push('人脸');
+      if (state.landmarksReady) parts.push('关键点');
+      if (state.expressionsReady) parts.push('表情');
+      if (parts.length) {
+        loadingText.textContent = '模型加载完成 (' + parts.join(' / ') + ')';
+        console.log('[ai] models loaded from', loadedFrom);
+      } else {
+        loadingText.textContent = '模型加载失败，将使用降级分析';
+        console.warn('[ai] all CDN sources failed');
+      }
+    }
+
+    // Race a promise against a timeout. Used to avoid hanging forever
+    // when a CDN is slow on mobile networks.
+    function withTimeout(p, ms) {
+      return new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('timeout ' + ms + 'ms')), ms);
+        p.then(
+          (v) => { clearTimeout(t); resolve(v); },
+          (e) => { clearTimeout(t); reject(e); }
+        );
+      });
     }
 
     async function detectFaces() {
@@ -1496,7 +1586,13 @@
       const cap = document.createElement('canvas');
       cap.width = w; cap.height = h;
       const cctx = cap.getContext('2d');
-      // Mirror correction: if front camera mirrored on display, we keep original here
+      // Match the on-screen mirror: if the user is seeing a mirrored preview
+      // (PC webcam, or mobile front camera), the saved photo should look the
+      // same way. Otherwise the user sees one thing and saves another.
+      if (stage.classList.contains('mirrored')) {
+        cctx.translate(w, 0);
+        cctx.scale(-1, 1);
+      }
       cctx.drawImage(video, 0, 0, w, h);
       const dataUrl = cap.toDataURL('image/jpeg', 0.92);
 
@@ -1600,7 +1696,8 @@
     // ============== Event Bindings ==============
     startBtn.addEventListener('click', async () => {
       // iOS Safari requires a user gesture before speechSynthesis works.
-      // Unlock it here so later voice announcements actually play.
+      // Pre-heat both the Web Audio session (best activator on iOS) AND
+      // speechSynthesis, then start periodic pings to keep both alive.
       unlockSpeech();
       // Make sure voice is on and play an audible test utterance INSIDE the
       // user-gesture handler. This is the single most reliable way to
@@ -1609,6 +1706,9 @@
       state.voiceEnabled = true;
       voiceBtn.classList.add('active');
       voiceBtn.textContent = '🔊';
+      // Reset the "last voice" throttle so the test utterance actually plays
+      // (in case a previous call just consumed the cooldown).
+      state.lastVoiceAt = 0;
       speakForce('语音引导已开启');
 
       startBtn.disabled = true;
@@ -1620,6 +1720,11 @@
         const modelP = loadFaceModel();
         await startCamera();
         await modelP;
+        // Re-warm the audio session once the camera is up. The camera
+        // permission dialog can take long enough on iOS that the original
+        // unlock has been suspended by the time the user actually starts
+        // using the app.
+        _pingAudio();
       } catch (e) {
         errText.textContent = e.message || String(e);
         startBtn.disabled = false;
@@ -1629,6 +1734,7 @@
     });
 
     flipBtn.addEventListener('click', async () => {
+      unlockSpeech();
       state.facingMode = state.facingMode === 'environment' ? 'user' : 'environment';
       // On PC, always mirror (webcam = selfie view).
       // On mobile, only mirror the front camera.
@@ -1637,13 +1743,23 @@
     });
 
     voiceBtn.addEventListener('click', () => {
+      unlockSpeech();
       state.voiceEnabled = !state.voiceEnabled;
       voiceBtn.classList.toggle('active', state.voiceEnabled);
       voiceBtn.textContent = state.voiceEnabled ? '🔊' : '🔇';
-      if (state.voiceEnabled) speak('语音引导已开启');
+      if (state.voiceEnabled) speakForce('语音引导已开启');
     });
     // init voice btn as active
     voiceBtn.classList.add('active');
+
+    // Pre-load voices on page load (iOS delivers them asynchronously).
+    // Hooking the event here means voices are ready by the time the user
+    // taps the start button, which makes the first live hint much more
+    // likely to actually speak.
+    if ('speechSynthesis' in window) {
+      loadVoices();
+      window.speechSynthesis.addEventListener('voiceschanged', loadVoices);
+    }
 
     shutter.addEventListener('click', () => {
       unlockSpeech();
@@ -1689,7 +1805,7 @@
       // Mobile path: prefer Web Share API so the user can save to Photos
       // (iOS Safari will offer "Save Image" in the share sheet; Android Chrome
       // will let the user pick the Photos / Gallery app from the share menu.)
-      if (isMobileDevice() && navigator.canShare) {
+      if (isMobileUA() && navigator.canShare) {
         try {
           const blob = await (await fetch(state.lastGallery)).blob();
           const file = new File([blob], filename, { type: 'image/jpeg' });
@@ -1716,7 +1832,7 @@
         document.body.appendChild(a);
         a.click();
         a.remove();
-        showToast(isMobileDevice() ? '长按图片可保存到相册' : '已保存到下载文件夹');
+        showToast(isMobileUA() ? '长按图片可保存到相册' : '已保存到下载文件夹');
         closeReview();
       } catch (e) {
         // Last-resort fallback: open image in a new tab for manual save
@@ -1734,11 +1850,12 @@
     // Mode selector
     document.querySelectorAll('.mode').forEach(m => {
       m.addEventListener('click', () => {
+        unlockSpeech();
         document.querySelectorAll('.mode').forEach(x => x.classList.remove('active'));
         m.classList.add('active');
         state.mode = m.dataset.mode;
         showToast('已切换到 ' + m.textContent + ' 模式');
-        if (state.voiceEnabled) speak('已切换到' + m.textContent + '模式');
+        if (state.voiceEnabled) speakForce('已切换到' + m.textContent + '模式');
       });
     });
 
