@@ -327,23 +327,35 @@
       flex-direction: column;
     }
     .review.show { display: flex; }
-    .review img {
-      flex: 1;
+    .review .photo-wrap {
+      flex: 0 0 auto;
       width: 100%;
+      max-height: 45vh;
+      display: flex; align-items: center; justify-content: center;
+      background: #000;
+      overflow: hidden;
+    }
+    .review img {
+      width: 100%;
+      max-height: 45vh;
       object-fit: contain;
       background: #000;
+      display: block;
     }
     .review .bar {
-      padding: 16px;
-      padding-bottom: max(16px, env(safe-area-inset-bottom));
+      flex: 0 0 auto;
+      padding: 14px 16px;
+      padding-bottom: max(14px, env(safe-area-inset-bottom));
       display: flex; align-items: center; justify-content: space-between;
       background: #111;
+      border-top: 1px solid #222;
+      gap: 8px;
     }
     .review .bar .left, .review .bar .right {
-      display: flex; gap: 10px;
+      display: flex; gap: 8px; flex-wrap: wrap;
     }
     .review .btn {
-      padding: 10px 18px;
+      padding: 10px 16px;
       border-radius: 100px;
       background: rgba(255,255,255,0.1);
       color: #fff;
@@ -357,11 +369,13 @@
       color: #000;
     }
     .review .report {
+      flex: 1 1 auto;
+      min-height: 0;
       background: #0a0a0f;
       padding: 14px 16px;
       border-top: 1px solid #222;
-      max-height: 40vh;
       overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
     }
     .review .report h3 {
       font-size: 14px;
@@ -513,17 +527,19 @@
 
     <!-- Review Modal -->
     <div class="review" id="review">
-      <img id="reviewImg" alt="预览">
-      <div class="report" id="report"></div>
+      <div class="photo-wrap">
+        <img id="reviewImg" alt="预览">
+      </div>
       <div class="bar">
         <div class="left">
           <button class="btn" id="reviewClose">关闭</button>
         </div>
         <div class="right">
           <button class="btn" id="reviewAgain">再拍一张</button>
-          <button class="btn primary" id="reviewSave">保存到本地</button>
+          <button class="btn primary" id="reviewSave">保存到相册</button>
         </div>
       </div>
+      <div class="report" id="report"></div>
     </div>
 
     <div class="toast" id="toast"></div>
@@ -632,24 +648,98 @@
       }, 3000);
     }
 
+    // Detect if running on a mobile device (affects mirror + save behavior)
+    function isMobileDevice() {
+      return /Mobi|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    }
+
+    // Determine if video should be mirrored:
+    // - On PC, the webcam is always the "selfie" view, so always mirror
+    // - On mobile, only mirror the front camera (user-facing)
+    function shouldMirrorCamera() {
+      if (!isMobileDevice()) return true;
+      return state.facingMode === 'user';
+    }
+
+    // ===== Speech Synthesis helpers (with iOS Safari unlock) =====
+    let _voicesReady = false;
+    let _voices = [];
+    function loadVoices() {
+      if (!('speechSynthesis' in window)) return;
+      _voices = window.speechSynthesis.getVoices() || [];
+      _voicesReady = _voices.length > 0;
+    }
+    function ensureVoices(cb) {
+      if (!('speechSynthesis' in window)) { cb && cb(false); return; }
+      loadVoices();
+      if (_voicesReady) { cb && cb(true); return; }
+      // iOS Safari: voices load asynchronously
+      const t = setTimeout(() => { cb && cb(_voicesReady); }, 800);
+      window.speechSynthesis.addEventListener('voiceschanged', function once() {
+        window.speechSynthesis.removeEventListener('voiceschanged', once);
+        clearTimeout(t);
+        loadVoices();
+        cb && cb(_voicesReady);
+      });
+    }
+
+    // iOS Safari only enables speechSynthesis after a user gesture.
+    // We call this on first user click to "unlock" it.
+    function unlockSpeech() {
+      if (unlockSpeech._done) return;
+      unlockSpeech._done = true;
+      try {
+        const u = new SpeechSynthesisUtterance(' ');
+        u.volume = 0;
+        u.lang = 'zh-CN';
+        window.speechSynthesis.speak(u);
+      } catch (e) { /* ignore */ }
+      loadVoices();
+    }
+
+    function pickChineseVoice() {
+      if (!_voices.length) return null;
+      // Prefer a zh-CN voice; fall back to any Chinese voice
+      return _voices.find(v => /zh[-_]CN/i.test(v.lang))
+          || _voices.find(v => /zh/i.test(v.lang))
+          || _voices[0];
+    }
+
     function speak(text) {
       if (!state.voiceEnabled) return;
       if (!('speechSynthesis' in window)) return;
       const now = Date.now();
       if (now - state.lastVoiceAt < CONFIG.VOICE_COOLDOWN_MS) return;
       state.lastVoiceAt = now;
-      try {
-        speechSynthesis.cancel();
-        const u = new SpeechSynthesisUtterance(text);
-        u.lang = 'zh-CN';
-        u.rate = 1.0;
-        u.pitch = 1.0;
-        u.volume = 0.9;
-        speechSynthesis.speak(u);
-        voiceDot.classList.add('show');
-        clearTimeout(speak._t);
-        speak._t = setTimeout(() => voiceDot.classList.remove('show'), 1800);
-      } catch (e) { /* ignore */ }
+
+      // Build a single utterance and speak it once voices are known.
+      // On iOS Safari, voices load asynchronously after `voiceschanged`.
+      // On Chrome / Edge / desktop, voices are usually available immediately.
+      const doSpeak = () => {
+        try {
+          window.speechSynthesis.cancel();
+          const u = new SpeechSynthesisUtterance(text);
+          u.lang = 'zh-CN';
+          u.rate = 1.0;
+          u.pitch = 1.0;
+          u.volume = 1.0;
+          const v = pickChineseVoice();
+          if (v) { u.voice = v; u.lang = v.lang; }
+          window.speechSynthesis.speak(u);
+        } catch (e) { /* ignore */ }
+      };
+
+      if (_voicesReady) {
+        doSpeak();
+      } else {
+        // Wait for voiceschanged, but fall back after 800ms so we don't
+        // end up silent if the event never fires (older WebViews).
+        ensureVoices((ready) => doSpeak());
+      }
+
+      voiceDot.classList.add('show');
+      clearTimeout(speak._t);
+      speak._t = setTimeout(() => voiceDot.classList.remove('show'), 1800);
     }
 
     function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
@@ -713,6 +803,8 @@
           video.onloadedmetadata = () => res();
         });
         await video.play();
+        // Apply mirror transform based on device type
+        stage.classList.toggle('mirrored', shouldMirrorCamera());
         // Resize overlay canvas to match video
         resizeOverlay();
         window.addEventListener('resize', resizeOverlay);
@@ -1256,11 +1348,11 @@
       if (msg) {
         const good = scores.total >= 80;
         setHudMessage(msg, good ? 'good' : (scores.total >= 60 ? 'warn' : 'bad'));
-        // Voice announce when message changes and total is good enough
+        // Voice announce whenever the hint changes — let the cooldown throttle it
         const key = msg;
         if (key !== renderScores._lastKey) {
           renderScores._lastKey = key;
-          if (good) speak(msg);
+          speak(msg);
         }
       }
     }
@@ -1411,6 +1503,9 @@
 
     // ============== Event Bindings ==============
     startBtn.addEventListener('click', async () => {
+      // iOS Safari requires a user gesture before speechSynthesis works.
+      // Unlock it here so later voice announcements actually play.
+      unlockSpeech();
       startBtn.disabled = true;
       startBtn.style.display = 'none';
       loading.classList.add('show');
@@ -1430,7 +1525,9 @@
 
     flipBtn.addEventListener('click', async () => {
       state.facingMode = state.facingMode === 'environment' ? 'user' : 'environment';
-      stage.classList.toggle('mirrored', state.facingMode === 'user');
+      // On PC, always mirror (webcam = selfie view).
+      // On mobile, only mirror the front camera.
+      stage.classList.toggle('mirrored', shouldMirrorCamera());
       await startCamera();
     });
 
@@ -1443,7 +1540,10 @@
     // init voice btn as active
     voiceBtn.classList.add('active');
 
-    shutter.addEventListener('click', capture);
+    shutter.addEventListener('click', () => {
+      unlockSpeech();
+      capture();
+    });
 
     galleryBtn.addEventListener('click', () => {
       if (state.lastGallery) {
@@ -1466,15 +1566,51 @@
 
     reviewClose.addEventListener('click', () => review.classList.remove('show'));
     reviewAgain.addEventListener('click', () => review.classList.remove('show'));
-    reviewSave.addEventListener('click', () => {
+    reviewSave.addEventListener('click', async () => {
       if (!state.lastGallery) return;
-      const a = document.createElement('a');
-      a.href = state.lastGallery;
-      a.download = 'ai-photo-' + Date.now() + '.jpg';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      showToast('已保存到下载文件夹');
+      unlockSpeech(); // safety: also unlock on any user gesture
+      const filename = 'ai-photo-' + Date.now() + '.jpg';
+
+      // Mobile path: prefer Web Share API so the user can save to Photos
+      // (iOS Safari will offer "Save Image" in the share sheet; Android Chrome
+      // will let the user pick the Photos / Gallery app from the share menu.)
+      if (isMobileDevice() && navigator.canShare) {
+        try {
+          const blob = await (await fetch(state.lastGallery)).blob();
+          const file = new File([blob], filename, { type: 'image/jpeg' });
+          if (navigator.canShare({ files: [file] })) {
+            await navigator.share({ files: [file], title: 'AI 摄影' });
+            showToast('已分享到相册');
+            return;
+          }
+        } catch (e) {
+          // user cancelled or share failed; fall through to download fallback
+          if (e && e.name === 'AbortError') return;
+        }
+      }
+
+      // Fallback / PC: trigger a download. On iOS this opens the image in a new
+      // tab where the user can long-press → "Save to Photos".
+      try {
+        const a = document.createElement('a');
+        a.href = state.lastGallery;
+        a.download = filename;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        showToast(isMobileDevice() ? '长按图片可保存到相册' : '已保存到下载文件夹');
+      } catch (e) {
+        // Last-resort fallback: open image in a new tab for manual save
+        const w = window.open();
+        if (w) {
+          w.document.write('<title>' + filename + '</title><body style="margin:0;background:#000"><img src="' + state.lastGallery + '" style="width:100%"></body>');
+          showToast('长按图片可保存到相册');
+        } else {
+          showToast('保存失败，请重试');
+        }
+      }
     });
 
     // Mode selector
